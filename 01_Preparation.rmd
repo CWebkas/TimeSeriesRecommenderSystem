@@ -1,0 +1,191 @@
+---
+title: "Preparation"
+author: "Lukas Weixler"
+date: "26 7 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggfortify, zoo, forecast, tsfeatures, parallel, data.table, furrr, tictoc, janitor, data.table)
+library(M4metalearning)
+```
+
+
+
+
+### Remove duplicate Time Series
+```{r}
+ts_rows <- ts_dataframe %>% pivot_wider(id_cols = 'id', values_from='Y', names_from='date')
+
+unique_ts <- ts_rows %>% distinct_at(vars(-id), .keep_all=T) %>% select(id)
+
+SPdata_reduced <- SPdata[unique_ts$id]
+```
+
+### Rename lst elements appropriately
+```{r}
+SPdata_reduced <- lapply(SPdata_reduced, seriesrenamR)
+```
+
+
+### Extract features
+```{r}
+tsfresh_feats <- lapply(SPdata_reduced[1:10],tsfresh_extractor)
+```
+
+```{r}
+Hyndman_Feats <- THA_features(SPdata_reduced[1:10])
+```
+
+
+### Map both feature groups into one df
+```{r}
+all_feats <- map2(tsfresh_feats, Hyndman_Feats, featconnectR)
+```
+
+```{r}
+all_feats_df <- data.frame(matrix(unlist(all_feats), nrow = length(all_feats), byrow = T))
+
+names(all_feats_df) <- names(all_feats[[1]])
+```
+
+### Reduce perfectly correlating elements
+```{r}
+cormat <- cor(all_feats_df)
+```
+
+
+### Kick Rows with only NA
+```{r}
+ColNums_NotAllMissing <- function(df){ # helper function
+  out <- as.vector(which(colSums(is.na(df)) != nrow(df)-1))
+  return(out)
+}
+
+delete.na <- function(DF, n=0) {
+  return(DF[rowSums(is.na(DF)) <= n,])
+}
+
+```
+
+
+### Reduce elements with all misssings
+```{r}
+cordf <- data.frame(cormat) %>% select(ColNums_NotAllMissing(.))
+
+cormat_reduced <- as.matrix(delete.na(cordf, 292))
+
+cordf_reduced <- data.frame(cormat_reduced)
+
+
+```
+
+
+
+
+```{r}
+cordf_reduced %>% gather(X, value) %>% 
+  filter(value >=0.999999999999) %>% 
+  tally()
+```
+
+```{r}
+table(cormat_reduced)['1']
+```
+
+# Show number of 1s per column
+```{r}
+out <- cordf_reduced %>% gather(X, value) %>% 
+  filter(value  >=0.999999999999) %>% 
+  group_by(X) %>% 
+  tally()
+```
+
+### Store elements with more than 1 element having corr = 1
+```{r}
+noDups <- out %>% filter(n ==1) %>% select(X) 
+
+final_df <- cordf_reduced[,c(noDups$X)]
+```
+
+```{r}
+grouping <- c(names(final_df))
+```
+
+
+### Syntactical adjustments
+```{r}
+names(all_feats_df) <- gsub('"', '.', names(all_feats_df))
+
+names(all_feats_df) <- gsub(',', '.', names(all_feats_df))
+
+names(all_feats_df) <- gsub(' ', '.', names(all_feats_df))
+
+names(all_feats_df) <- gsub('[()]', '.', names(all_feats_df))
+
+names(all_feats_df) <- gsub('-', '.', names(all_feats_df))
+
+```
+
+```{r}
+
+available_feats <- all_feats_df[,grouping]
+
+```
+
+
+
+
+### Normalization of available features
+```{r}
+
+available_feats_normed <- py_scaler(available_feats) %>% as_data_frame()
+
+names(available_feats_normed) <- names(available_feats)
+```
+
+```{r}
+# Add new feats to dataset
+
+for (i in 1:length(SPdata_reduced)){
+SPdata_reduced[[i]]$features <- round(available_feats_normed[i,], 7)}
+```
+
+
+### Calculate forecasts for SPData
+```{r}
+
+SPdata_holdout <- temp_holdout(SPdata_reduced)
+
+tic()
+SPdata_forecasted <- calc_forecasts(SPdata_holdout, c('naive_forec', 'snaive_forec', 'stlm_ar_forec', 'ets_forec', 'rw_drift_forec', 'thetaf_forec', 'auto_arima_forec', 'nnetar_forec'), n.cores=11)
+toc()
+
+save(SPdata_forecasted, file = '../data/SPdata_forecasted.RData')
+
+```
+
+
+### Check for NA Inf and huge errors
+```{r}
+sptrain <- calc_errors(SPdata_forecasted)
+
+
+idxlst <- unlist(lapply(1:length(sptrain),function(i){if(any(is.na(sptrain[[i]]$mase_err)) | any(is.infinite(sptrain[[i]]$mase_err))){return(i)}}))
+
+
+spdat_reduced <- SPdata_forecasted[-idxlst] 
+
+spdat_reduced <- calc_errors(spdat_reduced[-c(23545, 4771, 27102)])
+
+train_data <- create_feat_classif_problem(spdat_reduced)
+
+
+```
+
+

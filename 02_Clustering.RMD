@@ -1,0 +1,275 @@
+---
+title: "02_Clustering"
+author: "Lukas Weixler"
+date: "26 7 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, sampling, apcluster, data.table, dtw, tictoc, reticulate, ggdendro, ggfortify, reshape2, purrr)
+
+py_config()
+
+py_install('pandas')
+
+source_python('helperCode/add.py')
+```
+
+```{r}
+load("~/data/feats_normed.RData")
+load("~/data/SPDat_reduced_all.RData")
+load("~/data/feat_importance_clustered.RData")
+
+available_feats_normed <- feats_normed
+```
+
+
+
+# Extract ts length from data
+```{r}
+
+len_df <- function(elm){
+  out <- elm$n 
+  return(out)
+}
+
+
+lens <- lapply(spdat_reduced_all, len_df)
+
+
+len_df <- data.frame(matrix(unlist(lens), nrow = length(lens), byrow = T))
+
+len_df <- len_df %>% rename(length_ts = matrix.unlist.lens...nrow...length.lens...byrow...T.)
+```
+
+
+
+
+# Assign counter variable for length occurences
+```{r}
+helper_df <- len_df %>% 
+  
+  # Count occurences of a length
+  group_by(length_ts) %>% 
+  tally() #%>% 
+  
+  # Join to get the correct order for strata back
+  samp_df <- helper_df %>% left_join(len_df)
+```
+
+
+# Prepare dataset to only sample from frequently occuring lengths
+```{r}
+
+
+# Sample 10% of occurence if n is larger than 10
+sampsizes <- ifelse(helper_df$n >= 10,round(0.1*helper_df$n),1)
+```
+
+
+# Extract strata based on proposed sampsizes above
+```{r}
+
+set.seed(2021)
+all_insamp_indx <- strata(samp_df, stratanames = c("length_ts"), size = sampsizes, method = 'srswor')
+```
+
+### Index Dataframe to be able to reorder all features to their Time Series
+```{r}
+all_indxs <- tibble(ID_unit = c(seq(1:nrow(samp_df))))
+```
+
+```{r}
+all_outsamp_indxs <- all_indxs %>% anti_join(all_insamp_indx %>% select(ID_unit))
+```
+
+
+# Extract from original df via indexno, also get non sampled feats via anti join
+```{r}
+all_samped_units <- available_feats_normed[all_insamp_indx$ID_unit,] 
+```
+
+```{r, echo=F}
+all_non_samped_units <- available_feats_normed[all_outsamp_indxs$ID_unit,]
+```
+
+
+### Clustering
+
+```{r}
+prp <- py_affinity_propagation(all_samped_units)
+```
+
+
+### Predicting nonsampled units
+
+prp 1 contains the model
+```{r}
+preds <- py_affinity_predictor(prp[[1]], all_non_samped_units)
+```
+
+
+
+```{r}
+nonsamped_preds <- all_non_samped_units %>% mutate(cls_label = preds, insamp = rep(0, nrow(all_non_samped_units))) %>% mutate(cls_center = 0)
+```
+
+```{r}
+samped_labs <- all_samped_units %>% mutate(cls_label = prp[[2]], insamp = rep(1, nrow(all_samped_units))) %>% mutate(cls_center = 0)
+```
+
+### Label representatives with 1 for cls center
+```{r}
+samped_labs[prp[[3]],]$cls_center <- 1
+```
+
+
+### Bind nonsampled and sampled, including sample and cluster information
+
+```{r}
+all_data_labelled <- samped_labs %>% 
+  
+  # add ID unit in original TS List to sampled lables
+  mutate(ID_unit = all_insamp_indx$ID_unit) %>% 
+  
+  # Add ID unit to non sampled predictions before rowbinding
+  bind_rows(nonsamped_preds %>% mutate(ID_unit = all_outsamp_indxs$ID_unit)) 
+```
+
+
+### Plotting count per cluster
+```{r}
+all_data_labelled %>% filter(insamp==1) %>% ggplot(aes(cls_label))+geom_bar()+ggtitle('Number of TS per cluster over sampled Data')
+
+all_data_labelled %>% ggplot(aes(cls_label))+geom_bar()+ggtitle('Number of TS per cluster over all Data')
+```
+
+
+### Importance of sampled units
+```{r}
+#cls_importances
+
+
+
+feat_importance_insamp <- lapply(0:39, function(i){py_xgbooster(feat_importance_prep_insamp %>% mutate(cls_label = ifelse(cls_label == i, 1, 0)))})
+
+```
+
+
+
+```{r, fig.height=10, fig.width=15}
+
+cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+importancePlottr <- function(cls_elm, clsno, colours = c("1" = "#62879c", "2" = "#FF9900", "3" = "#CCFF00", "4" = "#fff478", "6" = "#00FF66", "7"="#00FFFF", "8"="#FF0000", "9"="#3300FF", "5"="#CC00FF", "0"="#000000")){
+  
+  
+
+plts <- cls_elm  %>% arrange(desc(importances)) %>% head(15) %>% 
+  left_join(feat_importance_clustered %>% select(-importances))%>%
+  mutate(cls=as.factor(cls)) %>% 
+  ggplot(aes(y = importances, x = reorder(names, importances), fill=cls))+
+  geom_bar(stat='identity', position = 'dodge')+
+  scale_fill_manual(values = colours)+
+  ggtitle(paste('CLS ', clsno))+coord_flip()+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size=15),
+        plot.title = element_text(size=20) )
+
+return(plts)
+}
+```
+
+
+
+# Plotting feature importance per cluster
+
+```{r, echo=F, message=F}
+plts <- map2(feat_importance_insamp, c(seq(0,39)), importancePlottr)
+```
+
+
+
+
+### Get information on most important features for each cluster
+
+```{r}
+
+# Run over all 36 clusters
+all_plts <- lapply(1:40,function(j){
+print(j)
+# Grab importances of first cluster, join with full df to have feature cls
+most_im_five <- feat_importance_insamp[[j]] %>% left_join(feat_importance_clustered %>% select(-importances)) %>% arrange(desc(importances)) %>% head(5) %>% select(names)
+
+
+
+# Get overall mean of most important features for all values
+all_vals <- all_data_labelled %>% filter(insamp==1) %>% select(most_im_five$names) %>%   summarise_all(mean) %>% melt(variable.name=c('varname'), value.name = c('overall_mean')) 
+
+
+# Get overall mean of most important features for cluster values
+cls_vals <- all_data_labelled %>% filter(insamp==1&cls_label == j-1) %>% select(most_im_five$names) %>% summarise_all(mean) %>% reshape2::melt(variable.name=c('varname'), value.name = c('cluster_mean')) 
+
+# Get singular values of most important features for representative time series
+repr_val <- all_data_labelled %>% filter(cls_center==1&cls_label == j-1) %>% select(most_im_five$names) %>% melt(variable.name=c('varname'), value.name = c('represent_TSfeature')) 
+
+
+# Join values together
+means_comp<-all_vals %>% inner_join(cls_vals, by=c('varname')) %>% inner_join(repr_val,by=c('varname')) #%>% mutate(repr = as_factor(c(0,0,1)))
+
+
+# Make plot for each feature individually
+out <- lapply(1:5,function(i){means_comp %>% 
+    reshape2::melt(variable.name=c('group')) %>% 
+    
+    # Pick respective feature via filter
+    filter(varname== most_im_five$names[i]) %>% 
+    
+    # Define column for who is representative
+    mutate(representative=as_factor(c(F,F,T))) %>% 
+    
+    # Make Plot
+    ggplot(aes(value,representative))+
+    geom_line(aes(group=representative))+
+    geom_point(aes(color=group, size = 5))+
+    theme(axis.text.y=element_text(size=10),
+          axis.text.x=element_text(size=10), 
+          text = element_text(size=10), 
+          legend.position = "none",
+          )+
+    # Title for orientation based on cls and varname
+    ggtitle(paste('CLS ',j-1 , " variable: ", gsub("_", ".", most_im_five$names[i])))})
+
+return(out)})
+
+
+
+
+
+```
+
+
+
+### Visualize cls centers
+
+```{r}
+# If ts is in affinity sample, then add to list
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$cls_center == 1 ){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+```
+
+
+```{r, fig.width=10}
+serieslst <- map2(sp_cls, c(seq(0:39)), function(lstelm, i){lstelm$Series %>% autoplot()+ggtitle(paste('Center of cls', i-1))+
+      theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))})
+```

@@ -1,0 +1,553 @@
+---
+title: "03_RecommenderSystem"
+author: "Lukas Weixler"
+date: "26 7 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, mltools)
+library(M4metalearning)
+```
+
+
+# Import required data
+```{r}
+load("~/data/SPDat_reduced_all.RData")
+load("~/data/spdat_reduced_cls.RData")
+```
+
+### Train Test Split
+
+```{r}
+set.seed(2021)
+indices <- sample(length(spdat_reduced_all))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+
+
+SPdata_train <- spdat_reduced_all[indices[1:to_train]]
+
+SPdata_test <-spdat_reduced_all[indices[from_test:length(indices)]]
+
+```
+
+# 1. Standard Model runthrough
+```{r,comment=FALSE, warning=FALSE}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# params are left default except for parallelization
+        param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+#2 Run the pipeline using optimized parameters
+```{r,comment=FALSE, warning=FALSE}
+
+# Calculate forecast errors for each method
+SPdata_train <- calc_errors(SPdata_train)
+
+# Rank methods based on softmax logic
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=11, eta=0.5543024, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9532598,
+                  colsample_bytree=1
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random
+
+# Train
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+### Hyperparameter Tuning (will run multiple hours!)
+```{r}
+pms = hyperparameter_search(SPdata_train, filename = 'find_hyper.RData', n_iter = 500, n.cores=11)
+```
+
+
+# 3. All Cluster labels
+
+### Import Cluster-labelled Dataset
+```{r}
+load("~/data/spdat_reduced_cls.RData")
+
+sp_cls <- spdat_reduced_all
+
+```
+
+### Save cls_label as only feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+
+```
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+dt <- one_hot(cls_dat)
+
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+```
+
+
+### Train Test SPlit
+
+```{r}
+set.seed(2021)
+indices <- sample(length(sp_cls))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+
+SPdata_train <- sp_cls[indices[1:to_train]]
+
+SPdata_test <-sp_cls[indices[from_test:length(indices)]]
+
+```
+
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r,comment=FALSE, warning=FALSE}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+# 4. Only Sampled Cluster data
+
+```{r}
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$insamp == 1 ){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+```
+
+
+
+### Save cls_label as only feature
+
+
+
+
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+
+```
+
+
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+
+set.seed(2020)
+randsamps <-cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>%  group_by(cls) %>% sample_n(1)
+unsamped <- cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>% anti_join(randsamps)
+
+dt <- one_hot(cls_dat)
+
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+
+```
+
+
+
+### Train Test SPlit
+
+```{r}
+set.seed(2021)
+indices <- sample(length(sp_cls))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+SPdata_train <- sp_cls[indices[1:to_train]]
+
+SPdata_test <-sp_cls[indices[from_test:length(indices)]]
+
+```
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+# Model-Based feature importance
+```{r}
+mat <- xgboost::xgb.importance (feature_names = colnames(test_data$data),
+                       model = meta_model)
+xgboost::xgb.plot.importance(importance_matrix = mat[1:15], cex=0.5)
+```
+
+### Closer examination of single features among their quantiles
+```{r}
+
+
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__index_mass_quantile__q_0.9, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__index_mass_quantile__q_0.9>= featquantile[i]&
+           tstfeats$Y__index_mass_quantile__q_0.9< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p1 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Index_mass_quantile_q_0.9")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(1,2,3,4,5,6,7,8,9,10))
+
+
+# can be continued for less important features as well
+
+```
+
+### Feature Importance over entire model
+```{r}
+
+colours = c("1" = "#62879c", "2" = "#FF9900", "3" = "#CCFF00", "4" = "#fff478", "6" = "#00FF66", "7"="#00FFFF", "8"="#FF0000", "9"="#3300FF", "5"="#CC00FF", "0"="#000000")
+
+plt_allfeatimp <- mat %>% head(15) %>% rename(names = Feature) %>% 
+  left_join(feat_importance_clustered %>% select(-importances), by='names') %>% 
+  mutate(cls = as_factor(cls), names = gsub('_','.', names)) %>% 
+  ggplot(aes(y=Gain, x=reorder(names, Gain), fill=cls))+geom_bar(stat='identity', position = 'dodge')+coord_flip()+
+  theme(axis.title.y = element_blank())+
+  scale_fill_manual(values=colours)
+
+plt_allfeatimp
+```
+# Probabilities for forecasting methods
+
+### Max Probability
+```{r}
+max_proba <- tibble(
+  max_probability = factor(max.col(preds), 
+  labels = names(data.frame(train_data[["errors"]])))) %>% group_by(max_probability) %>% tally() %>% 
+  rename(method.name = max_probability, count = n)
+```
+
+### Mean Probability
+```{r}
+mean_proba <- tibble(
+  method_name = names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(preds)/nrow(preds))
+```
+
+
+
+```{r}
+mean_proba <- tibble(
+  method_name = names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(preds)/nrow(preds))
+
+mean_proba <- mean_proba %>% mutate(method_name = gsub('_','.', method_name)) %>% rename(columnAverage = column_avg)
+
+
+# plotting the share of maximum for each method
+
+
+max_proba <- max_proba %>% mutate(method.name = gsub('_', '.', method.name))
+
+maxplt <- ggplot(max_proba,aes(x=method.name, y=count))+
+#  scale_x_discrete(limits=mean_proba$method_name)+
+  geom_bar(fill = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"), stat='identity')+
+  scale_x_discrete(limits=max_proba$method.name)+
+  ggtitle('Largest probabilities')+
+    theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_blank(),
+    title = element_text(size=12))
+
+# plotting the average probability for each method
+
+
+
+meanplt <-ggplot(mean_proba, aes(x=method_name, y=columnAverage))+geom_bar(fill = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"),stat='identity')+
+  scale_x_discrete(limits=mean_proba$method_name)+
+  ggtitle('Average probabilities')+  
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_blank(),
+    title = element_text(size=12))
+
+maxplt
+meanplt
+```
+
+
+### Cluster-Specific Max Importance
+```{r}
+cls_max_importance_plts <- lapply(0:39, function(i, colours =  c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999")){
+  cls_indxs <- labs %>% 
+  filter(cls_lab == i) %>% 
+  select(tstdat_indxno) %>% 
+  unlist()
+
+# change prediction matrix to df
+predsdf <- data.frame(preds)
+
+# renaming prediction df to our methods
+names(predsdf) <- names(data.frame(train_data[["errors"]]))
+
+# selecting rows of interest
+sub_tstdat <- predsdf[cls_indxs,]
+
+
+
+max_proba <- tibble(max_probability = factor(max.col(sub_tstdat), ))
+
+# selector tool for relevant algorithms
+apparent_algos <- sort(unlist(unique(max_proba$max_probability)))
+
+# plotting the share of maximum for each method
+ggplot(max_proba, 
+       aes(max_probability))+
+  geom_bar(aes(y =(..count..)/sum(..count..)), fill=colours[apparent_algos])+
+  scale_fill_manual(values = c('orange', 'green'))+
+  ggtitle(paste('Share of most probable methods in cls ', i))+
+  scale_x_discrete(labels = names(sub_tstdat)[apparent_algos])+
+  theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))
+
+
+})
+
+```
+
+### Cluster-Specific Mean importance
+```{r}
+
+
+cls_mean_importance_plts <- lapply(0:39, function(i, colours = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999")){
+  cls_indxs <- labs %>% 
+  filter(cls_lab == i) %>% 
+  select(tstdat_indxno) %>% 
+  unlist()
+
+# change prediction matrix to df
+predsdf <- data.frame(preds)
+
+# renaming prediction df to our methods
+names(predsdf) <- names(data.frame(train_data[["errors"]]))
+
+# selecting rows of interest
+sub_tstdat <- predsdf[cls_indxs,]
+
+
+
+mean_proba <- tibble(
+  method_name =names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(sub_tstdat)/nrow(sub_tstdat))
+
+# selector tool for relevant algorithms
+#apparent_algos <- sort(unlist(unique(mean_proba$column_avg)))
+
+# plotting the share of maximum for each method
+ggplot(mean_proba, 
+       aes(x=method_name, y=column_avg))+
+  geom_bar(stat='identity',fill=colours)+
+  ggtitle(paste('Avg probability in each cls ', i))+
+  scale_x_discrete(limits=mean_proba$method_name)+
+  theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))
+
+
+})
+
+
+
+
+```
+
+
