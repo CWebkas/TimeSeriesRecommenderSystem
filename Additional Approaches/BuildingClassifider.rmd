@@ -1,0 +1,130 @@
+---
+title: "Classification"
+author: "Lukas Weixler"
+date: "6 4 2021"
+output: html_document
+---
+
+
+## Preparations
+
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggfortify, zoo, forecast, tsfeatures, parallel, data.table, furrr, tictoc, janitor, data.table)
+library(M4metalearning)
+```
+
+```{r}
+ts_rows <- ts_dataframe %>% pivot_wider(id_cols = 'id', values_from='Y', names_from='date')
+```
+
+```{r}
+dat <- ts_rows %>% select(-id) %>% get_dupes(setdiff(names(ts_rows), "id")) 
+```
+
+### only keep unique and firsts of duplicates
+```{r}
+unique_ts <- ts_rows %>% distinct_at(vars(-id), .keep_all=T) %>% select(id)
+```
+
+```{r}
+SPdata_reduced <- SPdata[unique_ts$id]
+```
+
+```{r}
+SPdata[[63037]]$Index
+```
+### Extracting time series features from the Hyndman Package
+```{r}
+SPdata_feats <- lapply(SPdata_reduced[30000:33265], seriesrenamR) %>% THA_features(n.cores = 11)
+```
+
+```{r}
+
+```
+
+### Extracting time series features from the tsfresh Package
+```{r}
+
+crs <- detectCores()
+cls <- makeCluster(crs-1)
+
+clusterEvalQ(cls, {library(tidyverse); library(reticulate)})
+clusterExport(cls, "tsfresh_extractor")
+
+tic()
+#out <- lapply(SPfeats[1:100], seriesrenamR) 
+#out <- THA_features(out, n.cores = crs)
+
+tsfresh_feats <- parLapply(cls, SPdata_reduced, safely(tsfresh_extractor))
+toc()
+
+stopCluster(cls)
+#tic()
+#all_feats <- THA_features(tsfresh_feats, n.cores = 11)
+
+```
+
+```{r}
+for (i in 1:length(tsfresh_feats)){
+  if (is.null(tsfresh_feats[[i]]$result)){
+    print(i)
+  }
+}
+```
+
+### Manually editing problematic extract
+```{r}
+
+SPdata_reduced[[27980]]$Index <- '9_999'
+tsfresh_feats[[27980]] <- lapply(list(SPdata_reduced[[27980]]), safely(tsfresh_extractor))[[1]]
+```
+
+```{r}
+
+tsfresh_feats_clean <- c()
+
+for(i in 1:length(tsfresh_feats)){
+  tsfresh_feats_clean[[length(tsfresh_feats_clean)+1]]<- tsfresh_feats[[i]]$result
+}
+```
+
+### Extract THA features
+```{r}
+SPdata_clean <- lapply(SPdata_reduced, seriesrenamR)
+```
+
+
+```{r}
+tic()
+all_feats <- THA_features(SPdata_clean, n.cores = 11)
+toc()
+```
+
+
+### Extract ts as dataframe by row
+
+
+```{r}
+dfConvertr <- function(data){
+  # just focus on ts
+  dat<- data$Series
+  
+  # convert to df - keep timestamp
+  #out <- data.frame(Y=as.matrix(dat), date=as.Date(time(dat)))
+  return(out)
+  }
+```
+
+
+### Convert lists to dfs, bind to one
+```{r}
+tsf_df <- SPdata_reduced %>% lapply(dfConvertr) %>% rbindlist(idcol='id')
+```
+
+### Export data to use tsfresh extraction
+
+```{r}
+fwrite(tsf_df, 'dataframe_for_tsfresh.csv')
+```

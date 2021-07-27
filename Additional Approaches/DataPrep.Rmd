@@ -1,0 +1,107 @@
+---
+title: "FeaturePreparation"
+author: "Lukas Weixler"
+date: "12 4 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+out <- tsfresh_feats_clean[[1]]$tsfresh_features %>% 
+  bind_cols(Hyndman_Feats[[1]]$features) %>% 
+  bind_cols(Hyndman_Feats[[1]]$Company) %>% 
+  bind_cols(Hyndman_Feats[[1]]$Level) %>%
+  bind_cols(Hyndman_Feats[[1]]$Currency) %>% 
+  rename(Company = ...819, Level = ...820, Currency = ...821)
+
+```
+
+```{r}
+
+featconnectR <- function(tsf, hyn){
+out <- tsf$tsfresh_features %>% 
+  bind_cols(hyn$features) %>% 
+  bind_cols(hyn$Company) %>% 
+  bind_cols(hyn$Level) %>%
+  bind_cols(hyn$Currency) %>% 
+  rename(Company = ...819, Level = ...820, Currency = ...821)
+  return(out)
+}
+```
+
+```{r}
+fea
+```
+
+
+```{r}
+all_feats <- c()
+
+featconnectR <- function(hyn, tsf){
+  out <- tsf$tsfresh_feats %>% bind_cols(hyn$feats)  
+  return(out)
+}
+```
+
+
+```{r}
+all_feats <- map2(tsfresh_feats_clean, Hyndman_Feats, featconnectR)
+```
+
+
+#### Dimensionality Reduction via Reticulate
+
+```{r}
+library(reticulate)
+
+py_config()
+
+source_python('./helperCode/add.py')
+```
+
+```{r}
+data_to_reduce <- all_data_labelled[,c(1:268)]
+
+py_pca_demo(data_to_reduce, 2)
+
+```
+#### Obtain the pca
+```{r}
+reduced_data <- data.frame(py_pca(data_to_reduce, 2))
+```
+
+#### Merge to non-feature columns of original dataset
+```{r}
+reduced_data_labelled <- reduced_data %>% bind_cols(all_data_labelled[,c(269:272)])
+```
+
+#### Plot the reduced data
+```{r}
+
+reduced_data_labelled <- reduced_data_labelled %>%  mutate(cluster_label = as_factor(cls_label))
+
+plt <- ggplot()+geom_point(data=reduced_data_labelled, aes(X1, X2, col=cluster_label),size=0.5)+geom_text(data=reduced_data_labelled[reduced_data_labelled$cls_center==1,],aes(X1, X2, label=cls_label))+theme(text = element_text(size=12), axis.text = element_text(size=12))
+```
+
+```{r}
+addSmallLegend <- function(myPlot, pointSize = 0.5, textSize = 3, spaceLegend = 0.1) {
+    myPlot +
+        guides(shape = guide_legend(override.aes = list(size = pointSize)),
+               color = guide_legend(override.aes = list(size = pointSize))) +
+        theme(legend.title = element_text(size = textSize), 
+              legend.text  = element_text(size = textSize),
+              legend.key.size = unit(spaceLegend, "lines"))
+}
+```
+
+```{r}
+outplt <- addSmallLegend(plt, pointSize = 4, textSize = 12, spaceLegend = 1)
+```
+
+```{r}
+ggsave(file='dimreduced_cls.png',plot=outplt, height=11, width = 17)
+```
+

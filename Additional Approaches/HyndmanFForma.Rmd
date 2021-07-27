@@ -1,0 +1,917 @@
+---
+title: "HyndmanFFORMA"
+author: "Lukas Weixler"
+date: "10 5 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, reticulate, tictoc, reshape2, ggfortify, forecast)
+
+py_config()
+
+
+source_python('helperCode/add.py')
+
+
+library(M4metalearning)
+```
+
+```{r}
+
+# Get SPdata_reduced_feats
+
+#for (i in 1:length(SPdata_reduced)){
+#SPdata_reduced[[i]]$Features <- round(available_feats_normed[i,], 7)}
+```
+
+
+### Descriptive
+
+```{r}
+freqs <- lapply(1:length(SPdata_reduced_feats),function(i){return(SPdata_reduced_feats[[i]]$Frequency)})
+```
+
+```{r}
+freqs<- tibble(frequency = unlist(freqs))
+```
+
+```{r}
+ggplot(freqs, aes(frequency))+geom_bar(stat='count')
+```
+```{r}
+SPdata_reduced_feats <- SPdata_train
+```
+
+
+### Preparations
+```{r}
+
+for (i in 1:length(SPdata_reduced_feats)){
+  SPdata_reduced_feats[[i]]$x <- SPdata_reduced_feats[[i]]$Series
+  SPdata_reduced_feats[[i]]$h <- SPdata_reduced_feats[[i]]$ForecastHorizon
+  SPdata_reduced_feats[[i]]$features <- SPdata_reduced_feats[[i]]$Features
+  SPdata_reduced_feats[[i]]$Features <- NULL
+
+}
+
+```
+
+### Calculate forecasts for SPData
+```{r}
+
+SPdata_holdout <- temp_holdout(SPdata_reduced_feats)
+
+tic()
+SPdata_forecasted <- calc_forecasts(SPdata_holdout, c('naive_forec', 'snaive_forec', 'stlm_ar_forec', 'ets_forec', 'rw_drift_forec', 'thetaf_forec', 'auto_arima_forec', 'nnetar_forec'), n.cores=11)
+toc()
+
+save(SPdata_forecasted, file = '../data/SPdata_forecasted.RData')
+
+```
+
+```{r}
+save(SPdata_forecasted, file = '../data/SPdata_forecasted.RData')
+```
+
+
+
+
+
+
+### Calculate Errors and prepare for modeling
+
+```{r}
+for(i in 1:length(SPdata_train)){
+  SPdata_train[[i]]$features <- SPdata_train[[i]]$Features
+  SPdata_train[[i]]$Features <- NULL
+}
+```
+
+```{r}
+for(i in 1:length(SPdata_test)){
+  SPdata_test[[i]]$features <- SPdata_test[[i]]$Features
+  SPdata_test[[i]]$Features <- NULL
+}
+```
+
+### Check for NA Inf and huge errors
+```{r}
+sptrain <- calc_errors(SPdata_forecasted)
+
+
+idxlst <- unlist(lapply(1:length(sptrain),function(i){if(any(is.na(sptrain[[i]]$mase_err)) | any(is.infinite(sptrain[[i]]$mase_err))){return(i)}}))
+
+
+spdat_reduced <- SPdata_forecasted[-idxlst] 
+
+spdat_reduced <- calc_errors(spdat_reduced[-c(23545, 4771, 27102)])
+
+train_data <- create_feat_classif_problem(spdat_reduced)
+
+#sptrain <- calc_errors(spdat_reduced[-13211])
+
+#train_data <- create_feat_classif_problem(sptrain)
+```
+
+### Reduce and Train Test Split
+
+```{r}
+
+#spdat_reduced <- SPdata_forecasted[-idxlst]
+
+#spdat_reduced_all <- spdat_reduced[-c(23545, 4771, 27102, 31174)]
+
+
+set.seed(2021)
+indices <- sample(length(spdat_reduced_all))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+
+
+SPdata_train <- spdat_reduced_all[indices[1:to_train]]
+
+SPdata_test <-spdat_reduced_all[indices[from_test:length(indices)]]
+
+```
+
+
+### Run the pipeline
+```{r}
+
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=11, eta=0.5543024, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9532598,
+                  colsample_bytree=1
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+### Hyperparameter Tuning
+```{r}
+pms = hyperparameter_search(SPdata_train, filename = 'find_hyper.RData', n_iter = 500, n.cores=11)
+```
+
+
+# Evaluation
+```{r}
+mat <- xgboost::xgb.importance (feature_names = colnames(test_data$data),
+                       model = meta_model)
+xgboost::xgb.plot.importance(importance_matrix = mat[1:15], cex=0.5)
+```
+
+
+### Closer examination of single features
+```{r}
+
+
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__index_mass_quantile__q_0.9, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__index_mass_quantile__q_0.9>= featquantile[i]&
+           tstfeats$Y__index_mass_quantile__q_0.9< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p1 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Index_mass_quantile_q_0.9")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(1,2,3,4,5,6,7,8,9,10))
+
+
+
+### 2
+
+featInterest <- mat$Feature[k]
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_9, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_9>= featquantile[i]&
+           tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_9< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p2 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Energy_ratio_by_chunks_num_segments_10_segment_focus_9")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(3,4,5,6,7,8,9,10))
+
+
+
+#### 3
+featInterest <- mat$Feature[k]
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_8, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_8>= featquantile[i]&
+           tstfeats$Y__energy_ratio_by_chunks__num_segments_10__segment_focus_8< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p3 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Energy_ratio_by_chunks_num_segments_10_segment_focus_8")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(3,4,5,6,7,8,9,10))
+
+
+#### 4
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__ratio_value_number_to_time_series_length, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__ratio_value_number_to_time_series_length>= featquantile[i]&
+           tstfeats$Y__ratio_value_number_to_time_series_length< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p4 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Ratio_value_number_to_time_series_length")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(1,2,3,4,5,6,7))
+
+
+
+#####5
+
+
+featInterest <- mat$Feature[k]
+
+tstfeats <- lapply(1:6408, function(i){SPdata_test[[i]]$features}) %>% bind_rows(.id = "datnum")
+
+
+
+featquantile <- quantile(tstfeats$Y__value_count__value_0, probs = seq(0,1,0.1))
+
+
+# which elements in tstfeats are in which feature quantiles?
+
+featquantlst <- lapply(1:10,function(i){tstfeats[tstfeats$Y__value_count__value_0>= featquantile[i]&
+           tstfeats$Y__value_count__value_0< featquantile[i+1],]})
+
+# provide labels
+featquantlst <- lapply(1:10, function(i){featquantlst[[i]] %>% mutate(featquant = i)})
+
+# merge together
+featquantdf <- featquantlst %>% bind_rows() %>% mutate(datnum=as.numeric(datnum))
+
+
+# using datnum, add featquant to entries in preds
+
+predsdf <- as_data_frame(preds) 
+
+names(predsdf)<- names(data.frame(train_data[["errors"]]))
+
+
+datqtl <- predsdf %>% mutate(datnum = c(seq(1, 6408))) %>% left_join(featquantdf %>% select(datnum, featquant)) %>% group_by(featquant) %>% summarise_at(vars(-group_cols(), -datnum), mean) %>% rename() 
+
+
+quantdat_ready <- reshape2::melt(datqtl, measure.vars = c(names(predsdf)))
+
+
+p5 <- ggplot(quantdat_ready, aes(fill=variable, y=value, x=featquant))+geom_bar(position = 'stack', stat='identity')+ggtitle("Value_count__value_0")+labs(x='Feature Quantile', fill="Forecast", y="Average Probability")+scale_fill_manual(values =c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"))+scale_x_discrete(limits=c(4,5,6,7,8,9,10))
+
+```
+
+
+
+### Feature Importance over entire model
+```{r}
+
+colours = c("1" = "#62879c", "2" = "#FF9900", "3" = "#CCFF00", "4" = "#fff478", "6" = "#00FF66", "7"="#00FFFF", "8"="#FF0000", "9"="#3300FF", "5"="#CC00FF", "0"="#000000")
+
+plt_allfeatimp <- mat %>% head(15) %>% rename(names = Feature) %>% 
+  left_join(feat_importance_clustered %>% select(-importances), by='names') %>% 
+  mutate(cls = as_factor(cls), names = gsub('_','.', names)) %>% 
+  ggplot(aes(y=Gain, x=reorder(names, Gain), fill=cls))+geom_bar(stat='identity', position = 'dodge')+coord_flip()+
+  theme(axis.title.y = element_blank())+
+  scale_fill_manual(values=colours)
+
+plt_allfeatimp
+```
+```{r}
+feat_importance_clustered
+```
+
+
+
+```{r}
+min.col <- function(m, ...) max.col(-m, ...)
+```
+
+```{r}
+errdf <- train_data[["errors"]]
+```
+
+```{r}
+names(data.frame(train_data[["errors"]]))
+```
+
+
+```{r}
+max_proba <- tibble(
+  max_probability = factor(max.col(preds), 
+  labels = names(data.frame(train_data[["errors"]])))) %>% group_by(max_probability) %>% tally() %>% 
+  rename(method.name = max_probability, count = n)
+```
+
+
+
+
+```{r}
+errdf[errdf[,6]==max(errdf[,6]),]
+```
+
+```{r}
+mean_proba <- tibble(
+  method_name = names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(preds)/nrow(preds))
+```
+
+
+
+
+```{r}
+mean_proba <- tibble(
+  method_name = names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(preds)/nrow(preds))
+
+mean_proba <- mean_proba %>% mutate(method_name = gsub('_','.', method_name)) %>% rename(columnAverage = column_avg)
+
+
+# plotting the share of maximum for each method
+
+
+max_proba <- max_proba %>% mutate(method.name = gsub('_', '.', method.name))
+
+maxplt <- ggplot(max_proba,aes(x=method.name, y=count))+
+#  scale_x_discrete(limits=mean_proba$method_name)+
+  geom_bar(fill = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"), stat='identity')+
+  scale_x_discrete(limits=max_proba$method.name)+
+  ggtitle('Largest probabilities')+
+    theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_blank(),
+    title = element_text(size=12))
+
+# plotting the average probability for each method
+
+
+
+meanplt <-ggplot(mean_proba, aes(x=method_name, y=columnAverage))+geom_bar(fill = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999"),stat='identity')+
+  scale_x_discrete(limits=mean_proba$method_name)+
+  ggtitle('Average probabilities')+  
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_blank(),
+    title = element_text(size=12))
+
+maxplt
+meanplt
+```
+
+### Get method probability for each cls in the test dataset
+
+### Get cls labels of forecasted test data into single dataframe
+```{r}
+labs<- tibble(
+  cls_lab = unlist(lapply(1:length(tstdat),function(i){tstdat[[i]]$cls_information$cls_label})), 
+  tstdat_indxno = 1:length(tstdat))
+```
+
+
+```{r}
+names(data.frame(train_data[["errors"]]))
+```
+
+
+### Select lst elements belonging to specific cluster
+
+```{r}
+
+colours =  c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999")
+  cls_indxs <- labs %>% 
+  filter(cls_lab == 35) %>% 
+  select(tstdat_indxno) %>% 
+  unlist()
+
+# change prediction matrix to df
+predsdf <- data.frame(preds)
+
+# renaming prediction df to our methods
+names(predsdf) <- names(data.frame(train_data[["errors"]]))
+
+# selecting rows of interest
+sub_tstdat <- predsdf[cls_indxs,]
+
+
+
+max_proba <- tibble(max_probability = factor(max.col(sub_tstdat), ))
+
+# selector tool for relevant algorithms
+apparent_algos <- sort(unlist(unique(max_proba$max_probability)))
+
+# plotting the share of maximum for each method
+ggplot(max_proba, 
+       aes(max_probability))+
+  geom_bar(aes(y =(..count..)/sum(..count..)), fill=colours[apparent_algos])+
+  scale_fill_manual(values = c('orange', 'green'))+
+  ggtitle(paste('Share of most probable methods in cls 0'))+
+  scale_x_discrete(labels = names(sub_tstdat)[apparent_algos])+
+  theme(
+    axis.text.x = element_text(angle = 90, size=8),
+    title = element_text(size=12),
+    axis.title.x = element_blank())
+
+
+
+```
+
+
+```{r}
+cls_max_importance_plts <- lapply(0:39, function(i, colours =  c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999")){
+  cls_indxs <- labs %>% 
+  filter(cls_lab == i) %>% 
+  select(tstdat_indxno) %>% 
+  unlist()
+
+# change prediction matrix to df
+predsdf <- data.frame(preds)
+
+# renaming prediction df to our methods
+names(predsdf) <- names(data.frame(train_data[["errors"]]))
+
+# selecting rows of interest
+sub_tstdat <- predsdf[cls_indxs,]
+
+
+
+max_proba <- tibble(max_probability = factor(max.col(sub_tstdat), ))
+
+# selector tool for relevant algorithms
+apparent_algos <- sort(unlist(unique(max_proba$max_probability)))
+
+# plotting the share of maximum for each method
+ggplot(max_proba, 
+       aes(max_probability))+
+  geom_bar(aes(y =(..count..)/sum(..count..)), fill=colours[apparent_algos])+
+  scale_fill_manual(values = c('orange', 'green'))+
+  ggtitle(paste('Share of most probable methods in cls ', i))+
+  scale_x_discrete(labels = names(sub_tstdat)[apparent_algos])+
+  theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))
+
+
+})
+
+```
+
+
+
+```{r, fig.height=60, fig.width=60}
+library(gridExtra)
+n <- length(cls_fc_importance_plts)
+nCol <- floor(sqrt(n))
+do.call("grid.arrange", c(cls_fc_importance_plts, ncol=nCol))
+```
+
+
+
+```{r}
+
+
+cls_mean_importance_plts <- lapply(0:39, function(i, colours = c("#CC79A7", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00","#999999")){
+  cls_indxs <- labs %>% 
+  filter(cls_lab == i) %>% 
+  select(tstdat_indxno) %>% 
+  unlist()
+
+# change prediction matrix to df
+predsdf <- data.frame(preds)
+
+# renaming prediction df to our methods
+names(predsdf) <- names(data.frame(train_data[["errors"]]))
+
+# selecting rows of interest
+sub_tstdat <- predsdf[cls_indxs,]
+
+
+
+mean_proba <- tibble(
+  method_name =names(data.frame(train_data[["errors"]])), 
+  column_avg = colSums(sub_tstdat)/nrow(sub_tstdat))
+
+# selector tool for relevant algorithms
+#apparent_algos <- sort(unlist(unique(mean_proba$column_avg)))
+
+# plotting the share of maximum for each method
+ggplot(mean_proba, 
+       aes(x=method_name, y=column_avg))+
+  geom_bar(stat='identity',fill=colours)+
+  ggtitle(paste('Avg probability in each cls ', i))+
+  scale_x_discrete(limits=mean_proba$method_name)+
+  theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))
+
+
+})
+
+
+
+
+```
+
+
+```{r, fig.height=60, fig.width=60}
+library(gridExtra)
+n <- length(cls_fc_importance_plts)
+nCol <- floor(sqrt(n))
+do.call("grid.arrange", c(cls_fc_importance_plts, ncol=nCol))
+```
+
+
+
+
+
+### Algorithm Importance and CLS Representative
+```{r}
+algo_lst <- lapply(1:length(serieslst),function(i){
+list(serieslst[[i]],
+cls_max_importance_plts[[i]],
+cls_mean_importance_plts[[i]],plts[[i]]
+)})
+```
+
+### Other variant
+```{r}
+algo_lst_a <- lapply(1:length(serieslst),function(i){
+list(serieslst[[i]],
+cls_max_importance_plts[[i]],
+cls_mean_importance_plts[[i]]
+)})
+```
+
+
+
+
+```{r,  fig.height=5, fig.width=30}
+library(gridExtra)
+n <- 4
+nCol <- 3
+
+plot_combis_algos <- lapply(1:40,function(k){
+do.call("grid.arrange", c(algo_lst_a[[k]], ncol=nCol))})
+```
+
+
+### Try modify the plots
+```{r}
+
+for (i in 1:40){
+
+exemplar <- serieslst[[i]]+theme(axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 12))+ggtitle('Cluster Exemplar')
+
+feat_importance <- plts[[i]]+
+  theme(axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size=12))+ggtitle('Feature Importances')
+
+
+
+mean_fc<- cls_mean_importance_plts[[i]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 12))+ggtitle('Average Probabilities')
+
+
+
+max_fc <- cls_max_importance_plts[[i]]+ylab('share')+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 12))+ggtitle('Largest Probabilities')
+
+bottom <- grid.arrange(
+
+all_plts[[i]][[1]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 10)),
+
+all_plts[[i]][[2]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 10)),
+
+all_plts[[i]][[3]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 10)),
+
+all_plts[[i]][[4]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 10)),
+
+all_plts[[i]][[5]]+theme(
+                axis.title.y = element_text(size=12),
+                axis.title.x = element_text(size=12),
+                axis.text.y = element_text(size=10),
+                axis.text.x = element_text(size=10),
+                plot.title = element_text(size = 10))
+
+, ncol=5)
+
+#png('somegrid.png', width = 1000, height=600)
+upleft <- grid.arrange(exemplar,mean_fc,max_fc, ncol=3) 
+upall <- grid.arrange(upleft, feat_importance, ncol=2)
+
+library(grid)
+library(gridExtra)
+
+all <- grid.arrange(upall, bottom)
+
+ggsave(file=paste0('cls_infoplots/cls_infoplot',as.character(i-1),'.png'),plot=all, height=11, width = 17)}
+```
+
+
+```{r}
+plot_combis[[1]]
+```
+
+
+```{r}
+algo_lst_b <- lapply(1:length(serieslst),function(i){
+list(plot_combis_algos[[i]], plts[[i]]
+)})
+```
+
+
+
+
+```{r,fig.height = 5, fig.width = 30}
+library(gridExtra)
+n <- 4
+nCol <- 2
+
+plot_combis_algos <- lapply(1:40,function(k){
+do.call("grid.arrange", c(algo_lst_b[[k]], ncol=nCol))})
+```
+
+
+```{r,fig.height=50, fig.width=30}
+n <- 40
+nCol <- 1
+
+
+do.call("grid.arrange", c(algo_lst_b[1:10], ncol=nCol))
+```
+
+
+
+### Feature importance
+```{r}
+feat_lst <- lapply(1:length(serieslst),function(i){
+list(plot_combis[[i]]
+)})
+```
+
+```{r,  fig.height=5, fig.width=50}
+library(gridExtra)
+n <- 2
+nCol <- 2
+
+plot_combis_feats <- lapply(1:40,function(k){
+do.call("grid.arrange", c(feat_lst[[k]], ncol=nCol))})
+```
+
+
+### Finalize the common plot
+```{r}
+all_plt_lst <- lapply(1:length(serieslst),function(i){
+list(plot_combis_algos[[i]], plot_combis[[i]]
+)})
+```
+
+```{r,  fig.height=5, fig.width=100}
+library(gridExtra)
+n <- 2
+nCol <- 2
+
+all_plts_out <- lapply(1:40,function(k){
+do.call("grid.arrange", c(all_plt_lst[[k]], ncol=nCol))})
+```
+
+```{r}
+all_plts_out[1]
+```
+
+
+```{r,fig.height=50, fig.width=100}
+n <- 40
+nCol <- 1
+
+
+do.call("grid.arrange", c(all_plts_out[1:10], ncol=nCol))
+```
+
+```{r}
+library(gridExtra)
+n <- 2
+nCol <- 2
+
+all_plts_out <- lapply(1:40,function(k){
+do.call("grid.arrange", c(all_plt_lst[[k]], ncol=nCol))})
+```
+
+### Proper Renaming
+```{r}
+#importance histogram
+feature_importance <- plts
+#exemplars
+exemplar_series <- serieslst
+# feat_lst
+
+```
+
+```{r, fig.height=10, fig.width=10}
+grid.arrange(exemplar_series[[1]], feature_importance[[1]], ncol=1)
+
+#feature_importance[[1]]
+#exemplar_series[[1]]
+
+```
+
+
+```{r, fig.height=5, fig.width=15}
+grid.arrange(feat_lst[[1]][[1]]$grobs[[1]], feat_lst[[1]][[1]]$grobs[[2]], feat_lst[[1]][[1]]$grobs[[3]],feat_lst[[1]][[1]]$grobs[[4]],feat_lst[[1]][[1]]$grobs[[5]], ncol = 5)
+```
+
+
+```{r,  fig.height=5, fig.width=50}
+library(gridExtra)
+n <- 2
+nCol <- 2
+
+plot_combis_feats <- lapply(1:40,function(k){
+do.call("grid.arrange", c(feat_lst[[k]], ncol=nCol))})
+```
+
+### Results chapter two examples
+```{r}
+maxplt <- cls_max_importance_plts[[1]]+ylab('count')+theme(plot.title = element_text(size=12), axis.title.y=element_text(size=12), axis.text.x = element_text(size=12), axis.title.x = element_blank())+ggtitle("Largest probabilities")+scale_x_discrete(labels=c('naive:forec','snaive:forec'))
+
+
+meanplt <- cls_mean_importance_plts[[1]]+
+  ylab('column average')+
+  theme(plot.title = element_text(size=12), axis.title.y=element_text(size=12), 
+        axis.text.x = element_text(size=12), axis.title.x = 
+          element_blank())+ggtitle("Average probabilities")+
+  scale_x_discrete(labels=c('naive:forec','snaive:forec',
+                             'stlm:ar:forec','ets:forec','rw:drift:forec', 'thetaf:forec','auto:arima:forec','nnetar:forec'))
+
+
+grid.arrange(maxplt, meanplt, ncol=2)
+
+```
+

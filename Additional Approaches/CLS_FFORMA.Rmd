@@ -1,0 +1,554 @@
+---
+title: "CLS_FFORMA"
+author: "Lukas Weixler"
+date: "15 5 2021"
+output: html_document
+---
+
+```{r}
+pacman::p_load(mltools)
+```
+
+
+### Add Cls_information to each lst element
+```{r}
+
+for (i in 1:length(all_data_labelled$ID_unit)){
+  spdat_reduced_all[[all_data_labelled$ID_unit[i]]]$cls_information <- all_data_labelled[i,c('cls_label', 'insamp', 'cls_center', 'ID_unit')]}
+```
+
+
+
+
+
+# Clusters as features: 
+## 1. All datasets
+```{r}
+# taking all
+sp_cls <- spdat_reduced_all
+```
+
+
+### Save cls_label as only feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+
+```
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+dt <- one_hot(cls_dat)
+
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+```
+
+```{r}
+# SPdata_test <- sp_cls
+# SPdata_train <- sp_cls_cens
+```
+
+### Train Test SPlit
+
+```{r}
+set.seed(2021)
+indices <- sample(length(sp_cls))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+
+SPdata_train <- sp_cls[indices[1:to_train]]
+
+SPdata_test <-sp_cls[indices[from_test:length(indices)]]
+
+```
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+### Hyperparameter Tuning
+```{r}
+pms = hyperparameter_search(SPdata_train, filename = 'find_hyper_cls.RData', n_iter = 500, n.cores=11)
+```
+
+
+# Clusters as features: 
+## 2. Sampled datasets
+```{r}
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$insamp == 1 ){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+```
+
+
+
+### Save cls_label as only feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+for(i in 1:length(sp_cls_cens)){
+  sp_cls_cens[[i]]$features <- sp_cls_cens[[i]]$cls_info[,"cls_label"]
+}
+```
+
+
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+
+set.seed(2020)
+randsamps <-cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>%  group_by(cls) %>% sample_n(1)
+unsamped <- cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>% anti_join(randsamps)
+
+dt <- one_hot(cls_dat)
+
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+# for(i in 1:length(sp_cls_cens)){
+#   sp_cls_cens[[i]]$features <- dt_cens[i,]
+# }
+```
+
+```{r}
+# SPdata_test <- sp_cls
+# SPdata_train <- sp_cls_cens
+```
+
+### Train Test SPlit
+
+```{r}
+set.seed(2021)
+indices <- sample(length(sp_cls))
+
+
+to_train <- length(indices)*0.8
+from_test <- length(indices)*0.8+1
+
+SPdata_train <- sp_cls[indices[1:to_train]]
+
+SPdata_test <-sp_cls[indices[from_test:length(indices)]]
+
+```
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+# Clusters as features: 
+## 3. Affinity propagation centers
+```{r}
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$insamp == 1 & spdat_reduced_all[[i]]$cls_information$cls_center == 0){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+
+
+sp_cls_cens <- c()
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$cls_center == 1){
+  sp_cls_cens[[length(sp_cls_cens)+1]] <- spdat_reduced_all[[i]]}}
+
+# taking all
+#sp_cls <- spdat_reduced_all
+```
+
+
+
+
+### Save cls_label as only feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+for(i in 1:length(sp_cls_cens)){
+  sp_cls_cens[[i]]$features <- sp_cls_cens[[i]]$cls_info[,"cls_label"]
+}
+```
+
+
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+
+set.seed(2020)
+randsamps <-cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>%  group_by(cls) %>% sample_n(1)
+unsamped <- cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>% anti_join(randsamps)
+
+dt <- one_hot(cls_dat)
+
+
+cls_dat <- c()
+for(i in 1:length(sp_cls_cens)){
+  cls_dat[length(cls_dat)+1]<- sp_cls_cens[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+
+dt_cens <- one_hot(cls_dat)
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+for(i in 1:length(sp_cls_cens)){
+  sp_cls_cens[[i]]$features <- dt_cens[i,]
+}
+```
+
+
+
+### Train Test SPlit
+
+```{r}
+SPdata_test <- sp_cls
+
+SPdata_train <- sp_cls_cens
+```
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = tstdat)
+```
+
+
+# Clusters as features: 
+## 4. Random time series from every cluster
+
+
+```{r}
+
+# If ts is in affinity sample, then add to list
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$insamp == 1 ){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+```
+
+
+
+### Save cls_label as only feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- sp_cls[[i]]$cls_info[,"cls_label"]
+}
+
+```
+
+### One hot encode
+```{r}
+
+cls_dat <- c()
+for(i in 1:length(sp_cls)){
+  cls_dat[length(cls_dat)+1]<- sp_cls[[i]]$features
+}
+
+cls_dat <- data.table::data.table(cls=as_factor(unlist(cls_dat)))
+
+dt <- one_hot(cls_dat)
+
+
+# Add row number to cls dataframe and sample rownum out of every cluster
+set.seed(2020)
+randsamps <-cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>%  group_by(cls) %>% sample_n(1)
+unsamped <- cls_dat %>% mutate(rownum=1:nrow(cls_dat)) %>% anti_join(randsamps)
+
+
+
+```
+
+### Save as one hot encoded feature
+```{r}
+for(i in 1:length(sp_cls)){
+  sp_cls[[i]]$features <- dt[i,]
+}
+
+```
+
+
+
+### Train Test SPlit
+
+```{r}
+
+# Here split based on sampled ts data
+SPdata_train <- sp_cls[randsamps$rownum]
+
+SPdata_test <- sp_cls[unsamped$rownum]
+
+```
+
+### Run Hyndman Pipeline with the single one hot encoded cls
+```{r}
+
+SPdata_train <- calc_errors(SPdata_train)
+
+
+train_data <- create_feat_classif_problem(SPdata_train)
+
+
+# set the parameters based on optimization runthrough
+    param <- list(max_depth=14, eta=0.575188, nthread = 11, silent=1,
+                  objective=error_softmax_obj,
+                  num_class=ncol(train_data$errors),
+                  subsample=0.9161483,
+                  colsample_bytree=0.7670739
+    )
+
+
+set.seed(1345) #set the seed because xgboost is random!
+meta_model <- train_selection_ensemble(train_data$data, train_data$errors, param=param)
+
+
+
+# In order to create the newdata matrix required, the function create_feat_classif_problem can be used, it just produces the data object, not errors and labels.
+test_data <- create_feat_classif_problem(SPdata_test)
+
+
+
+# predict takes as parameters the model and a matrix with the features of the series. It outputs the predictions of the metalearning model, a matrix with the weights of the linear combination of methods, one row for each series.
+
+preds <- predict_selection_ensemble(meta_model, test_data$data)
+
+
+# The last step is calculating the actual forecasts by the linear combinations produced by the metalearning model.
+tstdat <- ensemble_forecast(preds, SPdata_test)
+
+summary <- summary_performance(preds, dataset = SPdata_test)
+```
+
+
+### Visualize cls centers
+
+```{r}
+# If ts is in affinity sample, then add to list
+sp_cls <- c()
+
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$cls_center == 1 ){
+  sp_cls[[length(sp_cls)+1]] <- spdat_reduced_all[[i]]}}
+```
+
+
+```{r, fig.width=10}
+serieslst <- map2(sp_cls, c(seq(0:39)), function(lstelm, i){lstelm$Series %>% autoplot()+ggtitle(paste('Center of cls', i-1))+
+      theme(
+    axis.text.x = element_text(angle = 90, size=20),
+    title = element_text(size=25))})
+```
+
+
+
+
+```{r, fig.height=60, fig.width=60}
+library(gridExtra)
+n <- length(serieslst)
+nCol <- floor(sqrt(n))
+do.call("grid.arrange", c(serieslst, ncol=nCol))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+center_ts <- c()
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$cls_center == 1){
+  center_ts[[length(center_ts)+1]] <- spdat_reduced_all[[i]]
+  }
+  }
+```
+
+```{r}
+
+center_ts <- c()
+for (i in 1:length(spdat_reduced_all)){
+  if(spdat_reduced_all[[i]]$cls_information$cls_center == 1){
+  print(spdat_reduced_all[[i]]$cls_information$cls_label)
+  }
+  }
+```
+
+```{r}
+for (i in 1:length(spdat_reduced_all)){
+  print(spdat_reduced_all[[i]]$cls_information$cls_label)
+  }
+```
+

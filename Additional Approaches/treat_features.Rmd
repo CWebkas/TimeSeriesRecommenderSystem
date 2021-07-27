@@ -1,0 +1,332 @@
+---
+title: "FeaturePreparation"
+author: "Lukas Weixler"
+date: "12 4 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(corrplot, qgraph, tidyverse, naniar, matrixStats, gplots, factorextra)
+```
+
+
+```{r}
+out <- tsfresh_feats_clean[[1]]$tsfresh_features %>% 
+  bind_cols(Hyndman_Feats[[1]]$features) %>% 
+  bind_cols(Hyndman_Feats[[1]]$Company) %>% 
+  bind_cols(Hyndman_Feats[[1]]$Level) %>%
+  bind_cols(Hyndman_Feats[[1]]$Currency) %>% 
+  rename(Company = ...819, Level = ...820, Currency = ...821)
+
+```
+
+
+
+```{r}
+
+
+featconnectR <- function(tsf, hyn){
+  out <- tsf$tsfresh_features %>% bind_cols(hyn$features)  
+  return(out)
+}
+
+
+feat_df_hynd <- function(hyn){
+  out <- hyn$features 
+  return(out)
+}
+```
+
+### Map both feature groups into one df
+```{r}
+all_feats <- map2(tsfresh_feats_clean, Hyndman_Feats, featconnectR)
+```
+
+```{r}
+all_feats_df <- data.frame(matrix(unlist(all_feats), nrow = length(all_feats), byrow = T))
+```
+
+### Map just the Hyndman group into one df
+
+```{r}
+lst_Hyndman_Feats <- map(Hyndman_Feats, feat_df_hynd) 
+
+
+```
+
+```{r}
+Hyndman_feats_df <- data.frame(matrix(unlist(lst_Hyndman_Feats), nrow = length(lst_Hyndman_Feats), byrow = T))
+
+
+names(Hyndman_feats_df) <- names(lst_Hyndman_Feats[[1]])
+```
+
+
+
+### Lost features when running in Python
+
+Running tsfresh in python results in loss of 8 features which are listed below. This loss is accepted, since we only can obtain the correlogram through the python df.
+This information will be needed for later function implementation.
+```{r}
+tsf_r <- names(tsfresh_feats_clean[[1]]$tsfresh_features)
+
+tsf_py <- names(tsfeats_extracted_py)
+
+setdiff(tsf_r, tsf_py)
+```
+
+### Compare missings among tsfresh through R and Python
+We see no missings in the Hyndman Features
+```{r}
+gg_miss_case_cumsum(all_feats_df)
+gg_miss_case_cumsum(all_feats_df[1:787])
+gg_miss_case_cumsum(tsfeats_extracted_py)
+gg_miss_case_cumsum(Hyndman_feats_df)
+
+sum(is.na(Hyndman_feats_df))
+
+```
+
+
+
+```{r}
+
+```
+
+### Reduce perfectly correlating elements
+```{r}
+all_feats <- tsfeats_extracted_py %>% select(-X1) %>% bind_cols(Hyndman_feats_df)
+```
+
+
+
+```{r}
+cormat <- cor(all_feats)
+```
+### Kick Rows with only NA
+```{r}
+ColNums_NotAllMissing <- function(df){ # helper function
+  out <- as.vector(which(colSums(is.na(df)) != nrow(df)-1))
+  return(out)
+}
+
+delete.na <- function(DF, n=0) {
+  return(DF[rowSums(is.na(DF)) <= n,])
+}
+
+```
+
+### Reduce elements with all misssings
+```{r}
+cordf <- data.frame(cormat) %>% select(ColNums_NotAllMissing(.))
+
+cormat_reduced <- as.matrix(delete.na(cordf, 292))
+
+cordf_reduced <- data.frame(cormat_reduced)
+
+
+```
+
+### Show correlation among remaining 294 Variables
+Problematic: We also have correlation of 1 between different variables - need to omit before preceeding with analysis.
+```{r}
+#image(cormat, zlim = c(-1,-1))
+
+
+
+heatmap(cormat_reduced, scale = 'column', Colv = NA, Rowv = NA)
+```
+
+
+### Check number of perfect correlations
+
+```{r}
+cordf_reduced %>% gather(X, value) %>% 
+  filter(value >=0.999999999999) %>% 
+  tally()
+```
+
+```{r}
+table(cormat_reduced)['1']
+```
+
+
+
+# Show number of 1s per column
+```{r}
+out <- cordf_reduced %>% gather(X, value) %>% 
+  filter(value  >=0.999999999999) %>% 
+  group_by(X) %>% 
+  tally()
+```
+### Store elements with more than 1 element having corr = 1
+```{r}
+noDups <- out %>% filter(n ==1) %>% select(X) 
+
+length(noDups$X)
+final_df <- cordf_reduced[,c(noDups$X)]
+
+final_df_b <- cordf_reduced[c(noDups$X),c(noDups$X)] %>% drop_na()
+
+final_mat <- as.matrix(final_df)
+```
+
+
+
+```{r}
+gg_miss_var(final_df_b)
+```
+
+
+```{r}
+heatmap(as.matrix(final_df), scale = 'column', Colv = NA, Rowv = NA)
+```
+
+
+```{r}
+grouping <- c(names(final_df))
+```
+
+
+### Syntactical adjustments
+```{r}
+names(all_feats) <- gsub('"', '.', names(all_feats))
+
+names(all_feats) <- gsub(',', '.', names(all_feats))
+
+names(all_feats) <- gsub(' ', '.', names(all_feats))
+
+names(all_feats) <- gsub('[()]', '.', names(all_feats))
+
+names(all_feats) <- gsub('-', '.', names(all_feats))
+
+```
+
+```{r}
+
+all_available_feats <- all_feats[,grouping]
+
+```
+
+
+```{r}
+cormatrB <- cor(all_available_feats)
+```
+
+### Re-Plot the heatmap of inter-feature correlations
+```{r}
+heatmap(cormatrB)
+```
+
+### Extract feature data from list to df
+
+```{r}
+available_feats  <- rbindlist(lapply(spdat_reduced_all, function(i){return(i$features)}))
+```
+
+```{r}
+cls_feats  <- rbindlist(lapply(spdat_reduced_all, function(i){return(i$cls_information)}))
+```
+
+```{r}
+all_data_labelled <- available_feats %>% bind_cols(cls_feats)
+```
+
+
+### Normalization of available features
+```{r}
+
+available_feats_normed <- py_scaler(available_feats) %>% as_data_frame()
+
+names(available_feats_normed) <- names(available_feats)
+```
+
+
+
+
+
+
+
+### PCA Trial and Error
+```{r}
+feats_pca <- prcomp(all_available_feats, scale = T, center = T)
+```
+
+
+### Dimensionality can be reduced to approx 80 while keeping 95% of the variance.
+
+```{r}
+feats_var <- feats_pca$sdev^2
+
+pvp_feats <- feats_var/sum(feats_var)
+
+df <- data.frame(x=1:length(pvp_feats),
+                 y=cumsum(pvp_feats)*100/4)
+```
+
+```{r}
+fv <- fviz_eig(feats_pca, ncp = length(all_available_feats))
+
+fv <- fv + geom_point(data = df, aes(x,y), size=2, color="#00AFBB") +
+     geom_line(data=df, aes(x, y), color="#00AFBB") +
+     scale_y_continuous(sec.axis = sec_axis(~ . * 4, 
+                                   name = "Cumulative proportion of Variance Explained") )
+
+print(fv)
+```
+
+
+```{r}
+fviz_eig(feats_pca, ncp = 50)
+```
+
+```{r}
+# Graph of variables: default plot
+fviz_pca_var(feats_pca, label='none', col.var="contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"))
+```
+
+```{r}
+# Contributions of variables to PC1
+fviz_contrib(feats_pca, choice = "var", axes = 1, top = 30) 
+# Contributions of variables to PC2
+fviz_contrib(feats_pca, choice = "var", axes = 2, top = 30)
+```
+```{r}
+# perform principal components analysis
+pca <- prcomp(data) 
+
+# project new data onto the PCA space
+scale(newdata, pca$center, pca$scale) %*% pca$rotation 
+```
+
+
+### Utilizing pcatools package
+```{r}
+p <- princomp(all_available_feats, cor = T, scores = T)
+```
+
+```{r}
+screeplot(p)
+```
+```{r}
+  elbow <- findElbowPoint(p$variance)
+  elbow
+```
+```{r}
+  horn <- parallelPCA(all_available_feats)
+  horn$n
+```
+
+```{r}
+pca_feats <- feats_pca$x %>% as_data_frame() 
+```
+
+```{r}
+
+```
+
