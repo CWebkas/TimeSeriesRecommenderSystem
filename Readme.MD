@@ -1,7 +1,8 @@
 # Time Series Classification
 ### Master Thesis by Lukas Weixler (University of Konstanz) at s-peers AG 
-- Company Supervisors: Dr. Dominik Bertsche and Dr. Stefan Lieder
 - University Supervisors: Prof. Dr. Susumu Shikano and Prof. Dr. Peter Selb
+- Company Supervisors: Dr. Dominik Bertsche and Dr. Stefan Lieder
+
 
 ## Intro
 - Goal: 
