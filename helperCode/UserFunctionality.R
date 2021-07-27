@@ -56,14 +56,23 @@ affinity_propagator <- function(dat){
 seriesrenamR <- function(data){
   data$x<- data$Series
   data$h <- data$ForecastHorizon
-  SPdata_reduced_feats[[i]]$features<-SPdata_reduced_feats[[i]]$Features
-  SPdata_reduced_feats[[i]]$Features <- NULL
+  data$features<-data$Features
+  data$Features <- NULL
   data$Series <- NULL
   data$ForecastHorizon <- NULL
   return(data)}
 
 
+featconnectR <- function(tsf, hyn){
+  out <- tsf$tsfresh_features %>% bind_cols(hyn$features)  
+  return(out)
+}
 
+
+feat_df_hynd <- function(hyn){
+  out <- hyn$features 
+  return(out)
+}
 
 
 
