@@ -90,7 +90,7 @@ Literature is added and categorized throughout the entire process. View the curr
 - Describe XGBoost in this specific environment (80-20 split, hyperparameter tuning didn't help, softmax approach) - Use Hyndman, since I also use his package
 
 ## Data
-- Check this [link](https://cloud.uni-konstanz.de/index.php/s/STq79pjw9LgiG7z) to acesss the RData objects.
+- Check write me at lukeweixler@gmail.com to acesss the RData objects.
 - How many companies, how many hierarchies, domain
 - How many TS, length, seasonality etc
 - Deleted due to duplicates, inability to calculate an error
